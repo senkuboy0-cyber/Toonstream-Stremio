@@ -62,6 +62,44 @@ async function safeFetch(url, options = {}) {
   }
 }
 
+function extractVideoUrl(html, baseUrl) {
+  if (!html) return null;
+  
+  const $ = cheerio.load(html);
+  
+  // Try to find m3u8 URLs
+  const m3u8Patterns = [
+    /["']file["']\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/gi,
+    /(https?:\/\/[^\s"'>]+\.m3u8[^\s"'>]*)/gi,
+    /["']source["']\s*:\s*["'](https?:\/\/[^"']+)["']/gi,
+    /["']src["']\s*:\s*["'](https?:\/\/[^"']+)["']/gi,
+  ];
+  
+  for (const pattern of m3u8Patterns) {
+    const matches = html.match(pattern);
+    if (matches && matches.length > 0) {
+      return matches[0].replace(/["']/g, "").trim();
+    }
+  }
+  
+  // Try to find video sources in common players
+  const videoSources = $("video source, video source, source[type*='video']");
+  if (videoSources.length > 0) {
+    const src = videoSources.first().attr("src");
+    if (src) {
+      return src.startsWith("http") ? src : `${baseUrl}${src}`;
+    }
+  }
+  
+  // Try to find iframe with actual video
+  const iframes = $("iframe[src*='player'], iframe[src*='embed']");
+  if (iframes.length > 0) {
+    return iframes.first().attr("src");
+  }
+  
+  return null;
+}
+
 // Catalog handler
 async function catalogHandler({ type, id, extra }) {
   const metas = [];
@@ -85,8 +123,6 @@ async function catalogHandler({ type, id, extra }) {
     }
 
     const $ = cheerio.load(html);
-    
-    // Try multiple selectors
     const items = $("#movies-a ul > li, .movies-list li, article.post, .post-item");
     
     items.each((i, el) => {
@@ -152,7 +188,6 @@ async function metaHandler({ type, id }) {
     if (type === "series") {
       const videos = [];
       
-      // Try to find seasons
       const seasonButtons = $("a.season-btn, .season-btn, button[data-season]");
       console.log(`Found ${seasonButtons.length} season buttons`);
       
@@ -203,7 +238,6 @@ async function metaHandler({ type, id }) {
           }
         }
       } else {
-        // Fallback: try to find episodes directly on the page
         const episodes = $("article.post, .episode-item, #episode_by_temp article.post");
         console.log(`No seasons found, looking for direct episodes: ${episodes.length}`);
         
@@ -256,7 +290,7 @@ async function metaHandler({ type, id }) {
   }
 }
 
-// Stream handler
+// Stream handler - extract actual video URLs
 async function streamHandler({ type, id }) {
   const streams = [];
   try {
@@ -269,7 +303,6 @@ async function streamHandler({ type, id }) {
     const $ = cheerio.load(html);
     const servers = [];
     
-    // Try multiple selectors for iframes
     $("#aa-options > div > iframe, .video-server iframe, .server-list iframe, iframe[src]").each((i, iframe) => {
       try {
         let rawSrc = $(iframe).attr("data-src") || $(iframe).attr("src");
@@ -286,31 +319,39 @@ async function streamHandler({ type, id }) {
 
     for (const server of servers) {
       try {
+        // Fetch the embed/player page
         const serverHtml = await safeFetch(server);
-        if (!serverHtml) continue;
+        if (!serverHtml) {
+          console.log(`No HTML for server: ${server}`);
+          continue;
+        }
         
-        const $server = cheerio.load(serverHtml);
+        // Try to find actual video URL from the embed page
+        const actualVideoUrl = extractVideoUrl(serverHtml, server);
         
-        // Try to find actual video iframe
-        const videoIframe = $server(".Video iframe, div.Video iframe, iframe[src], #player iframe");
-        
-        if (videoIframe.length > 0) {
-          const truelink = videoIframe.first().attr("src");
-          if (truelink) {
-            let serverName = "Toonstream";
-            if (truelink.includes("as-cdn21.top")) serverName = "Zephyrflick 1080p";
-            else if (truelink.includes("emturbovid.com")) serverName = "EmTurboVid 1080p";
-            else if (truelink.includes("gdmirrorbot.nl")) serverName = "GDMirrorbot HD";
-            else if (truelink.includes("rubystm.com")) serverName = "Streamruby";
-            else if (truelink.includes("vidmoly.net")) serverName = "VidMoly";
-            
-            streams.push({
-              url: truelink,
-              title: serverName,
-              quality: "1080p",
-            });
-            console.log(`Found stream: ${serverName} - ${truelink}`);
-          }
+        if (actualVideoUrl) {
+          let serverName = "Toonstream";
+          if (actualVideoUrl.includes("as-cdn21.top")) serverName = "Zephyrflick 1080p";
+          else if (actualVideoUrl.includes("emturbovid.com")) serverName = "EmTurboVid 1080p";
+          else if (actualVideoUrl.includes("gdmirrorbot.nl")) serverName = "GDMirrorbot HD";
+          else if (actualVideoUrl.includes("rubystm.com")) serverName = "Streamruby";
+          else if (actualVideoUrl.includes("vidmoly.net")) serverName = "VidMoly";
+          
+          streams.push({
+            url: actualVideoUrl,
+            title: serverName,
+            quality: "1080p",
+          });
+          console.log(`Found actual video URL: ${serverName} - ${actualVideoUrl}`);
+        } else {
+          // If we can't extract actual URL, use the server URL as fallback
+          // Stremio will try to handle it
+          console.log(`Could not extract video URL from: ${server}, using as fallback`);
+          streams.push({
+            url: server,
+            title: "Server",
+            quality: "unknown",
+          });
         }
       } catch (err) {
         console.error(`Error processing server ${server}:`, err.message);
