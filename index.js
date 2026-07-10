@@ -88,20 +88,6 @@ async function safeFetch(url, options = {}) {
   }
 }
 
-function safeParse(html, selector) {
-  if (!html) return [];
-  const $ = cheerio.load(html);
-  const results = [];
-  $(selector).each((i, el) => {
-    try {
-      results.push(el);
-    } catch (e) {
-      console.error("Parse error:", e.message);
-    }
-  });
-  return results;
-}
-
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
   const metas = [];
   try {
@@ -292,6 +278,16 @@ app.use(express.json());
 
 app.get("/manifest.json", (req, res) => {
   res.json(manifest);
+});
+
+app.get("/configure", (req, res) => {
+  res.json({
+    id: ADDON_ID,
+    version: manifest.version,
+    name: manifest.name,
+    description: manifest.description,
+    configuration: [],
+  });
 });
 
 app.get("/catalog/:type/:id.json", async (req, res) => {
