@@ -12,13 +12,13 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [18.x, 20.x]
+        node-version: [20.x, 22.x]
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v3
+      uses: actions/setup-node@v4
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
@@ -33,15 +33,24 @@ jobs:
     - name: Check index.js syntax
       run: node -c index.js
 
-    - name: Verify manifest
+    - name: Verify manifest structure
       run: |
         node -e "
           const fs = require('fs');
           const code = fs.readFileSync('index.js', 'utf8');
-          if (code.includes('manifest') && code.includes('addonBuilder')) {
-            console.log('✓ Addon manifest and builder found');
-          } else {
-            console.error('✗ Missing manifest or addonBuilder');
-            process.exit(1);
-          }
+          const checks = [
+            ['manifest object', code.includes('const manifest = {')],
+            ['addonBuilder', code.includes('addonBuilder')],
+            ['catalog handler', code.includes('defineCatalogHandler')],
+            ['meta handler', code.includes('defineMetaHandler')],
+            ['stream handler', code.includes('defineStreamHandler')],
+            ['express server', code.includes('express()')],
+            ['manifest.json route', code.includes('/manifest.json')],
+          ];
+          let allOk = true;
+          checks.forEach(([name, ok]) => {
+            console.log(ok ? '✓' : '✗', name);
+            if (!ok) allOk = false;
+          });
+          if (!allOk) process.exit(1);
         "
