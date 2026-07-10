@@ -3,8 +3,31 @@ const express = require("express");
 const fetch = require("node-fetch");
 const cheerio = require("cheerio");
 
-const MAIN_URL = "https://toon-stream.site";
 const ADDON_ID = "com.toonstream.stremio";
+const DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json";
+
+let cachedMainUrl = "https://toon-stream.site";
+
+async function getMainUrl() {
+  if (cachedMainUrl && cachedMainUrl !== "https://toon-stream.site") {
+    return cachedMainUrl;
+  }
+  try {
+    const response = await fetch(DOMAINS_URL, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    if (response.ok) {
+      const data = await response.json();
+      if (data.toonstream) {
+        cachedMainUrl = data.toonstream;
+        return cachedMainUrl;
+      }
+    }
+  } catch (e) {
+    console.error("Failed to fetch domains:", e.message);
+  }
+  return cachedMainUrl;
+}
 
 const manifest = {
   id: ADDON_ID,
@@ -42,57 +65,83 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-async function fetchPage(url, options = {}) {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.5",
-      ...options.headers,
-    },
-    ...options,
-  });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+async function safeFetch(url, options = {}) {
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        ...options.headers,
+      },
+      ...options,
+    });
+    if (!response.ok) {
+      console.error(`HTTP ${response.status} for ${url}`);
+      return null;
+    }
+    return await response.text();
+  } catch (e) {
+    console.error(`Fetch error for ${url}:`, e.message);
+    return null;
   }
-  return response.text();
+}
+
+function safeParse(html, selector) {
+  if (!html) return [];
+  const $ = cheerio.load(html);
+  const results = [];
+  $(selector).each((i, el) => {
+    try {
+      results.push(el);
+    } catch (e) {
+      console.error("Parse error:", e.message);
+    }
+  });
+  return results;
 }
 
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
   const metas = [];
   try {
-    let url = `${MAIN_URL}/`;
+    const mainUrl = await getMainUrl();
+    let url = `${mainUrl}/`;
     if (id === "toonstream-movies") {
-      url = `${MAIN_URL}/category/anime-movies/`;
+      url = `${mainUrl}/category/anime-movies/`;
     } else if (id === "toonstream-cartoons") {
-      url = `${MAIN_URL}/category/animation-&-cartoon-movie/`;
+      url = `${mainUrl}/category/animation-&-cartoon-movie/`;
     } else if (id === "toonstream-anime") {
-      url = `${MAIN_URL}/category/anime-series/`;
+      url = `${mainUrl}/category/anime-series/`;
     }
     if (extra?.search) {
-      url = `${MAIN_URL}/page/1/?s=${encodeURIComponent(extra.search)}`;
+      url = `${mainUrl}/page/1/?s=${encodeURIComponent(extra.search)}`;
     }
-    const html = await fetchPage(url);
+    const html = await safeFetch(url);
+    if (!html) return { metas };
     const $ = cheerio.load(html);
     $("#movies-a ul > li").each((i, el) => {
-      const title = $(el).find("article > header > h2, article h2.entry-title").text()?.trim()?.replace("Watch Online", "")?.trim();
-      const href = $(el).find("article > a.lnk-blk, article a.lnk-blk").attr("href");
-      let posterRaw = $(el).find("article img").attr("src");
-      let poster = null;
-      if (posterRaw) {
-        if (posterRaw.startsWith("http")) poster = posterRaw;
-        else if (posterRaw.startsWith("//")) poster = `https:${posterRaw}`;
-      }
-      if (title && href) {
-        metas.push({
-          id: href,
-          type: type,
-          name: title,
-          poster: poster || "https://via.placeholder.com/150x225?text=" + encodeURIComponent(title),
-          background: poster || "https://via.placeholder.com/1200x675?text=" + encodeURIComponent(title),
-          posterShape: "portrait",
-        });
+      try {
+        const title = $(el).find("article > header > h2, article h2.entry-title").text()?.trim()?.replace("Watch Online", "")?.trim();
+        const href = $(el).find("article > a.lnk-blk, article a.lnk-blk").attr("href");
+        let posterRaw = $(el).find("article img").attr("src");
+        let poster = null;
+        if (posterRaw) {
+          if (posterRaw.startsWith("http")) poster = posterRaw;
+          else if (posterRaw.startsWith("//")) poster = `https:${posterRaw}`;
+        }
+        if (title && href) {
+          metas.push({
+            id: href,
+            type: type,
+            name: title,
+            poster: poster || "https://via.placeholder.com/150x225?text=" + encodeURIComponent(title),
+            background: poster || "https://via.placeholder.com/1200x675?text=" + encodeURIComponent(title),
+            posterShape: "portrait",
+          });
+        }
+      } catch (e) {
+        console.error("Error parsing catalog item:", e.message);
       }
     });
   } catch (error) {
@@ -103,7 +152,9 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 
 builder.defineMetaHandler(async ({ type, id }) => {
   try {
-    const html = await fetchPage(id);
+    const mainUrl = await getMainUrl();
+    const html = await safeFetch(id);
+    if (!html) return { meta: {} };
     const $ = cheerio.load(html);
     const title = $("header.entry-header > h1")?.text()?.trim().replace("Watch Online", "");
     let posterRaw = $("div.bghd > img").attr("src");
@@ -120,8 +171,8 @@ builder.defineMetaHandler(async ({ type, id }) => {
         const seasonNum = $(seasonElements[i]).attr("data-season");
         const postId = $(seasonElements[i]).attr("data-post");
         try {
-          const seasonHtml = await fetchPage(
-            `${MAIN_URL}/wp-admin/admin-ajax.php`,
+          const seasonHtml = await safeFetch(
+            `${mainUrl}/wp-admin/admin-ajax.php`,
             {
               method: "POST",
               headers: {
@@ -131,17 +182,22 @@ builder.defineMetaHandler(async ({ type, id }) => {
               body: `action=action_select_season&season=${seasonNum}&post=${postId}`,
             }
           );
+          if (!seasonHtml) continue;
           const $season = cheerio.load(seasonHtml);
           $season("article.post.episodes, article.post").each((j, ep) => {
-            const epHref = $season(ep).find("a.lnk-blk, a").attr("href");
-            const epName = $season(ep).find("h5.entry-title1, h2.entry-title, h3.entry-title")?.text()?.trim();
-            if (epHref && epName) {
-              videos.push({
-                id: epHref,
-                title: epName,
-                season: parseInt(seasonNum),
-                episode: videos.filter((v) => v.season === parseInt(seasonNum)).length + 1,
-              });
+            try {
+              const epHref = $season(ep).find("a.lnk-blk, a").attr("href");
+              const epName = $season(ep).find("h5.entry-title1, h2.entry-title, h3.entry-title")?.text()?.trim();
+              if (epHref && epName) {
+                videos.push({
+                  id: epHref,
+                  title: epName,
+                  season: parseInt(seasonNum) || 1,
+                  episode: videos.filter((v) => v.season === (parseInt(seasonNum) || 1)).length + 1,
+                });
+              }
+            } catch (e) {
+              console.error("Error parsing episode:", e.message);
             }
           });
         } catch (err) {
@@ -156,7 +212,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
           poster: poster,
           background: poster,
           description: description,
-          videos: videos,
+          videos: videos.length > 0 ? videos : undefined,
         },
       };
     } else {
@@ -180,20 +236,27 @@ builder.defineMetaHandler(async ({ type, id }) => {
 builder.defineStreamHandler(async ({ type, id }) => {
   const streams = [];
   try {
-    const html = await fetchPage(id);
+    const mainUrl = await getMainUrl();
+    const html = await safeFetch(id);
+    if (!html) return { streams };
     const $ = cheerio.load(html);
     const servers = [];
     $("#aa-options > div > iframe").each((i, iframe) => {
-      let rawSrc = $(iframe).attr("data-src");
-      if (!rawSrc) rawSrc = $(iframe).attr("src");
-      if (rawSrc) {
-        const serverlink = rawSrc.startsWith("http") ? rawSrc : `${MAIN_URL}${rawSrc}`;
-        servers.push(serverlink);
+      try {
+        let rawSrc = $(iframe).attr("data-src");
+        if (!rawSrc) rawSrc = $(iframe).attr("src");
+        if (rawSrc) {
+          const serverlink = rawSrc.startsWith("http") ? rawSrc : `${mainUrl}${rawSrc}`;
+          servers.push(serverlink);
+        }
+      } catch (e) {
+        console.error("Error parsing iframe:", e.message);
       }
     });
     for (const server of servers) {
       try {
-        const serverHtml = await fetchPage(server);
+        const serverHtml = await safeFetch(server);
+        if (!serverHtml) continue;
         const $server = cheerio.load(serverHtml);
         const videoIframe = $server(".Video iframe, div.Video iframe, iframe[src]");
         if (videoIframe.length > 0) {
@@ -239,7 +302,8 @@ app.get("/catalog/:type/:id.json", async (req, res) => {
     );
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Catalog route error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -251,7 +315,8 @@ app.get("/meta/:type/:id.json", async (req, res) => {
     );
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Meta route error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -263,7 +328,8 @@ app.get("/stream/:type/:id.json", async (req, res) => {
     );
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("Stream route error:", err.message);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
