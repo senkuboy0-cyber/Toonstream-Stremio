@@ -1,7 +1,7 @@
-const { addonBuilder, serializeUrl } = require("stremio-addon-sdk");
-const axios = require("axios");
-const cheerio = require("cheerio");
+const { addonBuilder } = require("stremio-addon-sdk");
 const express = require("express");
+const fetch = require("node-fetch");
+const cheerio = require("cheerio");
 
 const MAIN_URL = "https://toon-stream.site";
 const ADDON_ID = "com.toonstream.stremio";
@@ -42,6 +42,23 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
+async function fetchPage(url, options = {}) {
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.5",
+      ...options.headers,
+    },
+    ...options,
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+  return response.text();
+}
+
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
   const metas = [];
   try {
@@ -56,14 +73,8 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     if (extra?.search) {
       url = `${MAIN_URL}/page/1/?s=${encodeURIComponent(extra.search)}`;
     }
-    const response = await axios.get(url, {
-      timeout: 10000,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      },
-    });
-    const $ = cheerio.load(response.data);
+    const html = await fetchPage(url);
+    const $ = cheerio.load(html);
     $("#movies-a ul > li").each((i, el) => {
       const title = $(el).find("article > header > h2, article h2.entry-title").text()?.trim()?.replace("Watch Online", "")?.trim();
       const href = $(el).find("article > a.lnk-blk, article a.lnk-blk").attr("href");
@@ -92,14 +103,8 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 
 builder.defineMetaHandler(async ({ type, id }) => {
   try {
-    const response = await axios.get(id, {
-      timeout: 10000,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      },
-    });
-    const $ = cheerio.load(response.data);
+    const html = await fetchPage(id);
+    const $ = cheerio.load(html);
     const title = $("header.entry-header > h1")?.text()?.trim().replace("Watch Online", "");
     let posterRaw = $("div.bghd > img").attr("src");
     let poster = null;
@@ -115,18 +120,18 @@ builder.defineMetaHandler(async ({ type, id }) => {
         const seasonNum = $(seasonElements[i]).attr("data-season");
         const postId = $(seasonElements[i]).attr("data-post");
         try {
-          const seasonResponse = await axios.post(
+          const seasonHtml = await fetchPage(
             `${MAIN_URL}/wp-admin/admin-ajax.php`,
-            { action: "action_select_season", season: seasonNum, post: postId },
             {
+              method: "POST",
               headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
                 "X-Requested-With": "XMLHttpRequest",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
               },
-              timeout: 10000,
+              body: `action=action_select_season&season=${seasonNum}&post=${postId}`,
             }
           );
-          const $season = cheerio.load(seasonResponse.data);
+          const $season = cheerio.load(seasonHtml);
           $season("article.post.episodes, article.post").each((j, ep) => {
             const epHref = $season(ep).find("a.lnk-blk, a").attr("href");
             const epName = $season(ep).find("h5.entry-title1, h2.entry-title, h3.entry-title")?.text()?.trim();
@@ -175,14 +180,8 @@ builder.defineMetaHandler(async ({ type, id }) => {
 builder.defineStreamHandler(async ({ type, id }) => {
   const streams = [];
   try {
-    const response = await axios.get(id, {
-      timeout: 10000,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      },
-    });
-    const $ = cheerio.load(response.data);
+    const html = await fetchPage(id);
+    const $ = cheerio.load(html);
     const servers = [];
     $("#aa-options > div > iframe").each((i, iframe) => {
       let rawSrc = $(iframe).attr("data-src");
@@ -194,14 +193,8 @@ builder.defineStreamHandler(async ({ type, id }) => {
     });
     for (const server of servers) {
       try {
-        const serverResponse = await axios.get(server, {
-          timeout: 5000,
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          },
-        });
-        const $server = cheerio.load(serverResponse.data);
+        const serverHtml = await fetchPage(server);
+        const $server = cheerio.load(serverHtml);
         const videoIframe = $server(".Video iframe, div.Video iframe, iframe[src]");
         if (videoIframe.length > 0) {
           const truelink = videoIframe.first().attr("src");
@@ -239,27 +232,39 @@ app.get("/manifest.json", (req, res) => {
 });
 
 app.get("/catalog/:type/:id.json", async (req, res) => {
-  const result = await addon.handlers.catalog(
-    { type: req.params.type, id: req.params.id, extra: req.query },
-    {}
-  );
-  res.json(result);
+  try {
+    const result = await addon.handlers.catalog(
+      { type: req.params.type, id: req.params.id, extra: req.query },
+      {}
+    );
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/meta/:type/:id.json", async (req, res) => {
-  const result = await addon.handlers.meta(
-    { type: req.params.type, id: req.params.id },
-    {}
-  );
-  res.json(result);
+  try {
+    const result = await addon.handlers.meta(
+      { type: req.params.type, id: req.params.id },
+      {}
+    );
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/stream/:type/:id.json", async (req, res) => {
-  const result = await addon.handlers.stream(
-    { type: req.params.type, id: req.params.id },
-    {}
-  );
-  res.json(result);
+  try {
+    const result = await addon.handlers.stream(
+      { type: req.params.type, id: req.params.id },
+      {}
+    );
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/", (req, res) => {
