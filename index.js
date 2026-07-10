@@ -63,7 +63,6 @@ async function safeFetch(url, options = {}) {
 }
 
 // ─── Zephyrflick / AsCdn21 extractor ─────────────────────────────
-// POST /player/index.php?data={hash}&do=getVideo -> { videoSource: "m3u8..." }
 async function extractZephyrflick(url) {
   try {
     const hash = url.substringAfterLast("/");
@@ -93,7 +92,6 @@ async function extractZephyrflick(url) {
 }
 
 // ─── EmTurboVid extractor ────────────────────────────────────────
-// Looks for #video_player[data-hash] attribute containing m3u8
 async function extractEmTurboVid(url) {
   try {
     const html = await safeFetch(url);
@@ -112,14 +110,12 @@ async function extractEmTurboVid(url) {
 }
 
 // ─── Streamruby extractor ────────────────────────────────────────
-// Looks for "file": "https://...m3u8..." pattern in page source
 async function extractStreamruby(url) {
   try {
     const newUrl = url.includes("/e/") ? url.replace("/e/", "/") : url;
     const html = await safeFetch(newUrl);
     if (!html) return null;
     
-    // Try multiple patterns
     const patterns = [
       /["']file["']\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/gi,
       /(https?:\/\/[^\s"'>]+\.m3u8[^\s"'>]*)/gi,
@@ -138,20 +134,17 @@ async function extractStreamruby(url) {
 }
 
 // ─── VidMolyNet extractor ────────────────────────────────────────
-// Looks for jwplayer file key or raw m3u8 URL
 async function extractVidMolyNet(url) {
   try {
     const html = await safeFetch(url);
     if (!html) return null;
     
-    // Try jwplayer pattern first
     const jwPattern = /["']file["']\s*:\s*["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/gi;
     const jwMatch = jwPattern.exec(html);
     if (jwMatch && jwMatch[1]) {
       return jwMatch[1];
     }
     
-    // Fallback: raw m3u8 URL
     const rawPattern = /(https?:\/\/[^\s"'>]+\.m3u8[^\s"'>]*)/gi;
     const rawMatch = rawPattern.exec(html);
     if (rawMatch && rawMatch[1]) {
@@ -163,34 +156,7 @@ async function extractVidMolyNet(url) {
   return null;
 }
 
-// ─── GDMirrorbot extractor ───────────────────────────────────────
-async function extractGDMirrorbot(url) {
-  try {
-    // Simple version - fetch and look for video URLs
-    const html = await safeFetch(url);
-    if (!html) return null;
-    
-    const $ = cheerio.load(html);
-    
-    // Look for video sources
-    const videoSrc = $("video source, source[type*='video']").attr("src");
-    if (videoSrc) {
-      return videoSrc.startsWith("http") ? videoSrc : `${MAIN_URL}${videoSrc}`;
-    }
-    
-    // Look for m3u8 in page
-    const m3u8Pattern = /(https?:\/\/[^\s"'>]+\.m3u8[^\s"'>]*)/gi;
-    const match = m3u8Pattern.exec(html);
-    if (match && match[1]) {
-      return match[1];
-    }
-  } catch (e) {
-    console.error("GDMirrorbot extractor error:", e.message);
-  }
-  return null;
-}
-
-// ─── Generic extractor - try to find any m3u8 ────────────────────
+// ─── Generic extractor ───────────────────────────────────────────
 async function extractGeneric(url) {
   try {
     const html = await safeFetch(url);
@@ -205,6 +171,121 @@ async function extractGeneric(url) {
     console.error("Generic extractor error:", e.message);
   }
   return null;
+}
+
+// ─── Recursive embed page fetcher ────────────────────────────────
+// Fetch embed page and look for actual video iframe or m3u8
+async function resolveEmbedPage(url) {
+  let currentUrl = url;
+  let depth = 0;
+  const maxDepth = 3; // Prevent infinite loops
+  
+  while (depth < maxDepth) {
+    depth++;
+    console.log(`  [depth=${depth}] Fetching: ${currentUrl}`);
+    
+    const html = await safeFetch(currentUrl);
+    if (!html) break;
+    
+    const $ = cheerio.load(html);
+    
+    // Try to find m3u8 directly in page source
+    const m3u8Pattern = /(https?:\/\/[^\s"'>]+\.m3u8[^\s"'>]*)/gi;
+    const m3u8Match = m3u8Pattern.exec(html);
+    if (m3u8Match && m3u8Match[1]) {
+      console.log(`  Found m3u8 in page source: ${m3u8Match[1]}`);
+      return m3u8Match[1];
+    }
+    
+    // Try to find video iframe
+    const videoIframe = $(".Video iframe, div.Video iframe, iframe[src], #player iframe");
+    if (videoIframe.length > 0) {
+      const iframeSrc = videoIframe.first().attr("src");
+      if (iframeSrc) {
+        // If iframe points to another embed page, continue recursion
+        if (iframeSrc.includes("/embed/") || iframeSrc.includes("embed")) {
+          currentUrl = iframeSrc.startsWith("http") ? iframeSrc : `${MAIN_URL}${iframeSrc}`;
+          continue;
+        }
+        
+        // If it's a direct video URL (m3u8, mp4, etc.)
+        if (iframeSrc.includes(".m3u8") || iframeSrc.includes(".mp4")) {
+          console.log(`  Found video iframe: ${iframeSrc}`);
+          return iframeSrc;
+        }
+        
+        // If it's an external player (youtube, vimeo, etc.)
+        if (iframeSrc.includes("youtube.com") || iframeSrc.includes("youtu.be")) {
+          console.log(`  Found YouTube embed: ${iframeSrc}`);
+          return iframeSrc;
+        }
+        
+        // Otherwise fetch the iframe page
+        currentUrl = iframeSrc.startsWith("http") ? iframeSrc : `${MAIN_URL}${iframeSrc}`;
+        continue;
+      }
+    }
+    
+    // Try to find data-hash attribute (EmTurboVid style)
+    const dataHash = $("#video_player[data-hash]").attr("data-hash");
+    if (dataHash && dataHash.includes(".m3u8")) {
+      console.log(`  Found data-hash: ${dataHash}`);
+      return dataHash;
+    }
+    
+    // Try to find "file" key in JavaScript (Streamruby style)
+    const fileMatch = html.match(/["']file["']\s*:\s*["'](https?:\/\/[^"']+)["']/i);
+    if (fileMatch && fileMatch[1]) {
+      console.log(`  Found file key: ${fileMatch[1]}`);
+      return fileMatch[1];
+    }
+    
+    // No more nested embeds found
+    break;
+  }
+  
+  console.log(`  Could not resolve video URL from: ${url}`);
+  return null;
+}
+
+// ─── Identify server type and extract video URL ──────────────────
+async function extractVideoFromServer(serverUrl) {
+  // First, try to resolve the embed page recursively
+  const videoUrl = await resolveEmbedPage(serverUrl);
+  if (!videoUrl) return null;
+  
+  // Determine server name and quality
+  let serverName = "Server";
+  let quality = "unknown";
+  
+  if (videoUrl.includes("as-cdn21.top") || videoUrl.includes("as-cdn23.top")) {
+    serverName = "Zephyrflick 1080p";
+    quality = "1080p";
+  } else if (videoUrl.includes("emturbovid.com") || videoUrl.includes("turboviplay.com")) {
+    serverName = "EmTurboVid 1080p";
+    quality = "1080p";
+  } else if (videoUrl.includes("rubystm.com") || videoUrl.includes("streamruby.com")) {
+    serverName = "Streamruby";
+    quality = "unknown";
+  } else if (videoUrl.includes("vidmoly.net")) {
+    serverName = "VidMoly";
+    quality = "unknown";
+  } else if (videoUrl.includes("gdmirrorbot.nl") || videoUrl.includes("techinmind.space")) {
+    serverName = "GDMirrorbot";
+    quality = "unknown";
+  } else if (videoUrl.includes("youtube.com") || videoUrl.includes("youtu.be")) {
+    serverName = "YouTube";
+    quality = "unknown";
+  } else if (videoUrl.includes(".m3u8")) {
+    serverName = "Direct Stream";
+    quality = "1080p";
+  }
+  
+  return {
+    url: videoUrl,
+    title: serverName,
+    quality: quality,
+  };
 }
 
 // Catalog handler
@@ -397,7 +478,7 @@ async function metaHandler({ type, id }) {
   }
 }
 
-// Stream handler - use proper extractors
+// Stream handler - recursively resolve embed pages
 async function streamHandler({ type, id }) {
   const streams = [];
   try {
@@ -410,6 +491,7 @@ async function streamHandler({ type, id }) {
     const $ = cheerio.load(html);
     const servers = [];
     
+    // Find all iframe servers
     $("#aa-options > div > iframe, .video-server iframe, .server-list iframe, iframe[src]").each((i, iframe) => {
       try {
         let rawSrc = $(iframe).attr("data-src") || $(iframe).attr("src");
@@ -426,38 +508,15 @@ async function streamHandler({ type, id }) {
 
     for (const server of servers) {
       try {
-        let videoUrl = null;
-        let serverName = "Server";
+        const result = await extractVideoFromServer(server);
         
-        // Use appropriate extractor based on server URL
-        if (server.includes("as-cdn21.top") || server.includes("as-cdn23.top")) {
-          serverName = "Zephyrflick 1080p";
-          videoUrl = await extractZephyrflick(server);
-        } else if (server.includes("emturbovid.com") || server.includes("turboviplay.com")) {
-          serverName = "EmTurboVid 1080p";
-          videoUrl = await extractEmTurboVid(server);
-        } else if (server.includes("rubystm.com") || server.includes("streamruby.com")) {
-          serverName = "Streamruby";
-          videoUrl = await extractStreamruby(server);
-        } else if (server.includes("vidmoly.net")) {
-          serverName = "VidMoly";
-          videoUrl = await extractVidMolyNet(server);
-        } else if (server.includes("gdmirrorbot.nl") || server.includes("techinmind.space")) {
-          serverName = "GDMirrorbot";
-          videoUrl = await extractGDMirrorbot(server);
-        } else {
-          // Generic extractor for unknown servers
-          serverName = "Server";
-          videoUrl = await extractGeneric(server);
-        }
-
-        if (videoUrl) {
+        if (result) {
           streams.push({
-            url: videoUrl,
-            title: serverName,
-            quality: "1080p",
+            url: result.url,
+            title: result.title,
+            quality: result.quality,
           });
-          console.log(`✓ Extracted video: ${serverName} - ${videoUrl}`);
+          console.log(`✓ Extracted video: ${result.title} - ${result.url}`);
         } else {
           console.log(`✗ Failed to extract video from: ${server}`);
         }
