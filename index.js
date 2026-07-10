@@ -39,8 +39,6 @@ const manifest = {
   },
 };
 
-const builder = new addonBuilder(manifest);
-
 async function safeFetch(url, options = {}) {
   try {
     const response = await fetch(url, {
@@ -64,12 +62,8 @@ async function safeFetch(url, options = {}) {
   }
 }
 
-function extractMeta($, selector) {
-  const el = $(selector);
-  return el.text()?.trim() || "";
-}
-
-builder.defineCatalogHandler(async ({ type, id, extra }) => {
+// Catalog handler
+async function catalogHandler({ type, id, extra }) {
   const metas = [];
   try {
     let url = `${MAIN_URL}/home/`;
@@ -92,20 +86,14 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
 
     const $ = cheerio.load(html);
     
-    // Try multiple selectors to find content
+    // Try multiple selectors
     const items = $("#movies-a ul > li, .movies-list li, article.post, .post-item");
     
     items.each((i, el) => {
       try {
         const $el = $(el);
-        
-        // Try to find title
         const title = $el.find("h2.entry-title, h2, .title, .post-title").first().text()?.trim()?.replace("Watch Online", "")?.trim();
-        
-        // Try to find link
         const href = $el.find("a.lnk-blk, a[href], a").first().attr("href");
-        
-        // Try to find poster
         let posterRaw = $el.find("img").first().attr("src") || $el.find("img").first().attr("data-src");
         let poster = null;
         if (posterRaw) {
@@ -135,9 +123,10 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     console.error("Catalog handler error:", error.message);
   }
   return { metas };
-});
+}
 
-builder.defineMetaHandler(async ({ type, id }) => {
+// Meta handler
+async function metaHandler({ type, id }) {
   try {
     const html = await safeFetch(id);
     if (!html) {
@@ -147,7 +136,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
 
     const $ = cheerio.load(html);
     
-    const title = extractMeta($, "header.entry-header > h1, h1.entry-title, h1").replace("Watch Online", "");
+    const title = $("header.entry-header > h1, h1.entry-title, h1").first().text()?.trim().replace("Watch Online", "") || "Unknown";
     let posterRaw = $("div.bghd > img, .poster img, .thumb img").attr("src");
     let poster = null;
     if (posterRaw) {
@@ -156,7 +145,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
       else if (posterRaw.startsWith("/")) poster = `${MAIN_URL}${posterRaw}`;
     }
     
-    const description = extractMeta($, "div.description > p, .description p, .excerpt p");
+    const description = $("div.description > p, .description p, .excerpt p").first().text()?.trim();
     
     console.log(`Meta ${id}: title="${title}", hasDescription=${!!description}`);
 
@@ -242,7 +231,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
         meta: {
           id: id,
           type: type,
-          name: title || "Unknown",
+          name: title,
           poster: poster,
           background: poster,
           description: description,
@@ -254,7 +243,7 @@ builder.defineMetaHandler(async ({ type, id }) => {
         meta: {
           id: id,
           type: type,
-          name: title || "Unknown",
+          name: title,
           poster: poster,
           background: poster,
           description: description,
@@ -265,9 +254,10 @@ builder.defineMetaHandler(async ({ type, id }) => {
     console.error("Meta handler error:", error.message);
     return { meta: {} };
   }
-});
+}
 
-builder.defineStreamHandler(async ({ type, id }) => {
+// Stream handler
+async function streamHandler({ type, id }) {
   const streams = [];
   try {
     const html = await safeFetch(id);
@@ -330,7 +320,13 @@ builder.defineStreamHandler(async ({ type, id }) => {
     console.error("Stream handler error:", error.message);
   }
   return { streams };
-});
+}
+
+const builder = new addonBuilder(manifest);
+
+builder.defineCatalogHandler(catalogHandler);
+builder.defineMetaHandler(metaHandler);
+builder.defineStreamHandler(streamHandler);
 
 const addon = builder.getInterface();
 
@@ -353,10 +349,11 @@ app.get("/configure", (req, res) => {
 
 app.get("/catalog/:type/:id.json", async (req, res) => {
   try {
-    const result = await addon.handlers.catalog(
-      { type: req.params.type, id: req.params.id, extra: req.query },
-      {}
-    );
+    const result = await catalogHandler({
+      type: req.params.type,
+      id: req.params.id,
+      extra: req.query,
+    });
     res.json(result);
   } catch (err) {
     console.error("Catalog route error:", err.message);
@@ -366,10 +363,10 @@ app.get("/catalog/:type/:id.json", async (req, res) => {
 
 app.get("/meta/:type/:id.json", async (req, res) => {
   try {
-    const result = await addon.handlers.meta(
-      { type: req.params.type, id: req.params.id },
-      {}
-    );
+    const result = await metaHandler({
+      type: req.params.type,
+      id: req.params.id,
+    });
     res.json(result);
   } catch (err) {
     console.error("Meta route error:", err.message);
@@ -379,10 +376,10 @@ app.get("/meta/:type/:id.json", async (req, res) => {
 
 app.get("/stream/:type/:id.json", async (req, res) => {
   try {
-    const result = await addon.handlers.stream(
-      { type: req.params.type, id: req.params.id },
-      {}
-    );
+    const result = await streamHandler({
+      type: req.params.type,
+      id: req.params.id,
+    });
     res.json(result);
   } catch (err) {
     console.error("Stream route error:", err.message);
@@ -400,7 +397,7 @@ app.get("/", (req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Toonstream Stremio addon listening on port ${PORT}`);
   console.log(`Manifest available at http://localhost:${PORT}/manifest.json`);
